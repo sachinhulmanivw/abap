@@ -1,0 +1,176 @@
+*Constant Declaration
+    CONSTANTS: lcv_xml  TYPE string VALUE 'application/atom+xml;type=entry; charset=utf-8',
+               lcv_json TYPE string VALUE 'application/json; charset=utf-8'.
+
+    TRY.
+*Create Connection
+        DATA(lv_rfcdest) = CONV rfcdest( iv_endpoint ).
+        SELECT SINGLE rfcdest FROM rfcdes INTO @DATA(lv_dest) WHERE rfcdest = @lv_rfcdest.
+        IF sy-subrc IS INITIAL.
+*Create Connection by RFC Destination
+          CALL METHOD cl_http_client=>create_by_destination
+            EXPORTING
+              destination                = lv_rfcdest       " Logical destination (specified in function call)
+            IMPORTING
+              client                     = DATA(lo_http_client)                " HTTP Client Abstraction
+            EXCEPTIONS
+              argument_not_found         = 1                " Connection parameter (destination) not available
+              destination_not_found      = 2                " Destination was not found
+              destination_no_authority   = 3                " No Authorization to Use HTTP Destination
+              plugin_not_active          = 4                " HTTP/HTTPS communication not available
+              internal_error             = 5                " Internal error (e.g. name too long)
+              oa2c_set_token_error       = 6                " General error when setting the OAuth token
+              oa2c_missing_authorization = 7
+              oa2c_invalid_config        = 8
+              oa2c_invalid_parameters    = 9
+              oa2c_invalid_scope         = 10
+              oa2c_invalid_grant         = 11
+              OTHERS                     = 12.
+          IF sy-subrc <> 0.
+            MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+          ENDIF.
+
+        ELSE.
+*Create Connection By Endpoint URL
+         clear lo_http_client.
+          CALL METHOD cl_http_client=>create_by_url
+            EXPORTING
+              url                        = iv_endpoint              " URL
+            IMPORTING
+              client                     = lo_http_client                " HTTP Client Abstraction
+            EXCEPTIONS
+              argument_not_found         = 1                " Communication parameter (host or service) not available
+              plugin_not_active          = 2                " HTTP/HTTPS communication not available
+              internal_error             = 3                " Internal error (e.g. name too long)
+              pse_not_found              = 4                " PSE not found
+              pse_not_distrib            = 5                " PSE not distributed
+              pse_errors                 = 6                " General PSE error
+              oa2c_set_token_error       = 7                " General error when setting OAuth token
+              oa2c_missing_authorization = 8
+              oa2c_invalid_config        = 9
+              oa2c_invalid_parameters    = 10
+              oa2c_invalid_scope         = 11
+              oa2c_invalid_grant         = 12
+              OTHERS                     = 13.
+          IF sy-subrc <> 0.
+            MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+            WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+          ENDIF.
+
+**Authentication
+          lo_http_client->authenticate(
+          proxy_authentication = iv_proxy               " Proxy Logon (= 'X')
+          client               = ' '                    " R/3 system (client number from logon)
+          username             = ' '                    " ABAP System, User Logon Name
+          password             = ' '                    " Logon ID
+          language             = ' '                    " SAP System, Current Language
+          ).
+
+        ENDIF.
+
+        ev_ref = lo_http_client.
+
+*Set Method
+        lo_http_client->request->set_header_field(
+        name  = '~request_method'               " Name of the header field
+        value =  iv_method                      " HTTP header field value
+        ).
+
+*Set Server protocol
+        lo_http_client->request->set_header_field(
+        name  = '~server_protocol'                  " Name of the header field
+        value = 'HTTP/1.1'                          " HTTP header field value
+        ).
+
+        IF iv_method = 'GET'.
+*Get XCSRF Token
+          lo_http_client->request->set_header_field(
+          name  = 'x-csrf-token'              " Name of the header field
+          value = 'fetch'                     " HTTP header field value
+          ).
+        ELSE.
+
+*Set Content Type
+          IF NOT iv_content_type IS INITIAL.
+            DATA(lv_content_type) = |{ iv_content_type CASE = UPPER }|.
+            lv_content_type = SWITCH #( lv_content_type
+            WHEN 'JSON' THEN lcv_json
+            WHEN 'XML' THEN lcv_xml
+            ).
+            lo_http_client->request->set_header_field(
+            name  = 'content-type'               " Name of the header field
+            value = lv_content_type              " HTTP header field value
+            ).
+          ENDIF.
+
+*Set Data
+          lo_http_client->request->set_cdata(
+          data   = cv_data               " Character data
+                ).
+
+          IF cv_csrf_token IS NOT INITIAL.
+*Set XCSRF Token
+            lo_http_client->request->set_header_field(
+            name  = 'x-csrf-token'              " Name of the header field
+            value = cv_csrf_token               " HTTP header field value
+            ).
+          ENDIF.
+
+        ENDIF.
+
+*Send
+        lo_http_client->send(
+*  EXPORTING
+*    timeout                    = co_timeout_default " Timeout of Answer Waiting Time
+        EXCEPTIONS
+          http_communication_failure = 1                  " Communication Error
+          http_invalid_state         = 2                  " Invalid state
+          http_processing_failed     = 3                  " Error when processing method
+          http_invalid_timeout       = 4                  " Invalid Time Entry
+          OTHERS                     = 5
+          ).
+        IF sy-subrc <> 0.
+          MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+          WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+        ENDIF.
+
+*Receive
+        lo_http_client->receive(
+        EXCEPTIONS
+          http_communication_failure = 1                " Communication Error
+          http_invalid_state         = 2                " Invalid state
+          http_processing_failed     = 3                " Error when processing method
+          OTHERS                     = 4
+          ).
+        IF sy-subrc <> 0.
+          MESSAGE ID sy-msgid TYPE sy-msgty NUMBER sy-msgno
+          WITH sy-msgv1 sy-msgv2 sy-msgv3 sy-msgv4.
+        ENDIF.
+
+        IF iv_method = 'GET'.
+*Get X-csrf-token
+          lo_http_client->response->get_header_field(
+          EXPORTING
+            name  = 'x-csrf-token'                " Name of the header field
+            RECEIVING
+            value = cv_csrf_token               " HTTP header field value
+            ).
+        ENDIF.
+
+*Get Status
+        lo_http_client->response->get_status(
+        IMPORTING
+          code   = ev_status_code                 " HTTP Status Code
+          reason = ev_status_desc                  " HTTP status description
+          ).
+
+*Get Response
+        lo_http_client->response->get_cdata(
+        RECEIVING
+        data = cv_data                        " Character data
+              ).
+
+      CATCH cx_root INTO DATA(lv_root).
+        ev_message = lv_root->get_text( ).
+    ENDTRY.
